@@ -1,6 +1,13 @@
 [package]
 name = "fallible-structures"
 version = "0.1.0"
+authors = ["Lindon Kelley"]
 edition = "2024"
+license = "MIT OR Apache-2.0"
+# rust-version = 
+description = "Data structures, but with allocation fallibility"
+readme = "README.md"
+repository = "https://github.com/LindonKelley/fallible-structures"
+# https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
