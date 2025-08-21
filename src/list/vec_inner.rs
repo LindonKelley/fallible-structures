@@ -9,17 +9,17 @@ use crate::{alloc::{self, Allocator}, error::{AllocError, AllocLayoutError, Fixe
 
 /// Inner part of [crate::list::Vec], only deals with a vector of unintialized data and a capacity, users should implement proper
 /// drop handling for types and must keep track of the allocator. May leak memory if [VecInner::dealloc] isn't called.
-pub(crate) struct VecInner<V: VecInnerWithoutCapacity, C: Capacity<V>> {
+pub(crate) struct VecInner<V: VecInnerWithoutCapacity> {
     inner: V,
-    capacity: C
+    capacity: V::Capacity
 }
 
-impl <V: VecInnerWithoutCapacity, C: Capacity<V>> VecInner<V, C> {
+impl <V: VecInnerWithoutCapacity> VecInner<V> {
     /// Constructs and returns a new instance. [VecInner::dealloc] should be called at the end of this instance's life or else it may
     /// leak memory.
     pub(crate) fn new() -> Self {
         let (inner, capacity) = V::new();
-        Self { inner, capacity: C::from_new(capacity) }
+        Self { inner, capacity: V::Capacity::from_new(capacity) }
     }
 
     /// Attempts to increase the capacity by `additional`, implementations may over-reserve due to [Allocator::allocate] and similiar
@@ -137,6 +137,7 @@ pub(crate) trait VecInnerWithoutCapacity: Sized {
     type Allocator: Allocator;
     type ReserveError;
     type ShrinkError;
+    type Capacity: Capacity<Self>;
 
     /// Constructs and returns a new instance and the capacity, `cap`. Many interactions require a `cap` parameter, and this
     /// parameter must be consistent with interactions with this instance (no passing in any particular value). Users may choose
@@ -200,6 +201,8 @@ impl <T, A: Allocator, const IN_CAP: usize> VecInnerWithoutCapacity for SmallVec
     type ReserveError = AllocLayoutError;
 
     type ShrinkError = FixedSizeAllocError;
+
+    type Capacity = usize;
 
     fn new() -> (Self, usize) {
         let (inner_inline, cap) = InlineVecInnerWithoutCapacity::new();
@@ -299,6 +302,8 @@ impl <T, A: Allocator, const CAP: usize> VecInnerWithoutCapacity for InlineVecIn
 
     type ShrinkError = FixedSizeError;
 
+    type Capacity = ();
+
     fn new() -> (Self, usize) {
         unsafe {
             let s = Self(MaybeUninit::uninit().assume_init(), PhantomData);
@@ -367,6 +372,8 @@ impl <T, A: Allocator> VecInnerWithoutCapacity for AllocatingVecInnerWithoutCapa
     type ReserveError = AllocLayoutError;
 
     type ShrinkError = AllocError;
+
+    type Capacity = usize;
 
     fn new() -> (Self, usize) {
         let s = Self(NonNull::dangling(), PhantomData);
