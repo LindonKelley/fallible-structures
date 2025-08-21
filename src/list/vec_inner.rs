@@ -9,59 +9,57 @@ use crate::{alloc::{self, Allocator}, error::{AllocError, AllocLayoutError, Fixe
 
 /// Inner part of [crate::list::Vec], only deals with a vector of unintialized data and a capacity, users should implement proper
 /// drop handling for types and must keep track of the allocator. May leak memory if [VecInner::dealloc] isn't called.
-pub(crate) struct VecInner<V: VecInnerWithoutCapacity> {
+pub(crate) struct VecInner<V: VecInnerWithoutCapacity, C: Capacity<V>> {
     inner: V,
-    capacity: usize
+    capacity: C
 }
 
-impl <V: VecInnerWithoutCapacity> VecInner<V> {
+impl <V: VecInnerWithoutCapacity, C: Capacity<V>> VecInner<V, C> {
     /// Constructs and returns a new instance. [VecInner::dealloc] should be called at the end of this instance's life or else it may
     /// leak memory.
     pub(crate) fn new() -> Self {
         let (inner, capacity) = V::new();
-        Self { inner, capacity }
+        Self { inner, capacity: C::from_new(capacity) }
     }
 
     /// Attempts to increase the capacity by `additional`, implementations may over-reserve due to [Allocator::allocate] and similiar
-    /// potentionally over-allocating. If returning Ok, then the provided `cap` will be modified to reflect the changed capacity.
-    /// May panic if `cap` + `additional` overflows.
+    /// potentionally over-allocating. May panic if capacity + `additional` overflows.
     /// 
     /// # Safety
-    /// * The provided `cap` must be consistent with interactions with this instance, implementations are free to make 
-    /// soundness decisions based on this requirement.
     /// * The provided `alloc` must always be the same one used when interacting with this instance.
     pub(crate) unsafe fn reserve_capacity(&mut self, additional: usize, alloc: &V::Allocator) -> Result<(), V::ReserveError> {
-        self.inner.grow_capacity(&mut self.capacity, additional, alloc)
+        let mut cap = self.capacity.get();
+        let res = self.inner.grow_capacity(&mut cap, additional, alloc);
+        self.capacity.set(cap);
+        res
     }
 
     /// Attempts to shrink the capacity of this instance to just fit the provided `shrink_to`, may fail to shrink all the way.
-    /// If returning Ok, then the provided `cap` will be modified to reflect the changed capacity. if `shrink_to` >= `cap` then
-    /// this function simply returns Ok.
+    /// if `shrink_to` >= capacity then this function simply returns Ok.
     /// 
     /// # Safety
-    /// * The provided `cap` must be consistent with interactions with this instance, implementations are free to make 
-    /// soundness decisions based on this requirement.
     /// * The provided `alloc` must always be the same one used when interacting with this instance.
     pub(crate) unsafe fn shrink_capacity(&mut self, shrink_to: usize, alloc: &V::Allocator) -> Result<(), V::ShrinkError> {
-        self.inner.shrink_capacity(&mut self.capacity, shrink_to, alloc)
+        let mut cap = self.capacity.get();
+        let res = self.inner.shrink_capacity(&mut cap, shrink_to, alloc);
+        self.capacity.set(cap);
+        res
     }
 
-    /// Returns a reference to the uninitialized slice of the underlying values, the length of this slice will be the provided `cap`.
-    /// 
-    /// # Safety
-    /// * The provided `cap` must be consistent with interactions with this instance, implementations are free to make 
-    /// soundness decisions based on this requirement.
-    pub(crate) unsafe fn as_uninit_slice<'a>(&'a self) -> &'a [MaybeUninit<V::Item>] {
-        self.inner.as_uninit_slice(self.capacity)
+    /// Returns a reference to the uninitialized slice of the underlying values, the length of this slice will be [VecInner::capacity]
+    pub(crate) fn as_uninit_slice<'a>(&'a self) -> &'a [MaybeUninit<V::Item>] {
+        unsafe {
+            // SAFETY: ensured by this structure never modifying the capacities provided by the inner vec
+            self.inner.as_uninit_slice(self.capacity.get())
+        }
     }
 
-    /// Returns a mutable reference to the uninitialized slice of the underlying values, the length of this slice will be the provided `cap`.
-    /// 
-    /// # Safety
-    /// * The provided `cap` must be consistent with interactions with this instance, implementations are free to make 
-    /// soundness decisions based on this requirement.
-    pub(crate) unsafe fn as_uninit_slice_mut<'a>(&'a mut self) -> &'a mut [MaybeUninit<V::Item>] {
-        self.inner.as_uninit_slice_mut(self.capacity)
+    /// Returns a mutable reference to the uninitialized slice of the underlying values, the length of this slice will be [VecInner::capacity]
+    pub(crate) fn as_uninit_slice_mut<'a>(&'a mut self) -> &'a mut [MaybeUninit<V::Item>] {
+        unsafe {
+            // SAFETY: ensured by this structure never modifying the capacities provided by the inner vec
+            self.inner.as_uninit_slice_mut(self.capacity.get())
+        }
     }
 
     /// Deallocates this instance, if this function is not called, memory leaks may occur.
@@ -69,13 +67,65 @@ impl <V: VecInnerWithoutCapacity> VecInner<V> {
     /// # Safety
     /// * The provided `alloc` must always be the same one used when interacting with this instance.
     pub(crate) unsafe fn dealloc(self, alloc: &V::Allocator) {
-        self.inner.dealloc(self.capacity, alloc);
+        self.inner.dealloc(self.capacity.get(), alloc);
     }
 
-    /// Returns the current capacity of the allocation backing this instance. If the item type is zero-sized, this is guaranteed to always
-    /// return `usize::MAX`
+    /// Returns the current capacity of this instance, if the item type is zero-sized, this is guaranteed to always return `usize::MAX`.
     pub(crate) fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity.get()
+    }
+}
+
+pub(crate) trait Capacity<V> {
+    fn from_new(new_cap: usize) -> Self;
+
+    fn set(&mut self, cap: usize);
+
+    fn get(&self) -> usize;
+}
+
+#[mutants::skip]
+impl <T, A: Allocator, const IN_CAP: usize> Capacity<SmallVecInnerWithoutCapacity<T, A, IN_CAP>> for usize {
+    fn from_new(new_cap: usize) -> Self {
+        new_cap
+    }
+
+    fn set(&mut self, cap: usize) {
+        *self = cap;
+    }
+
+    fn get(&self) -> usize {
+        *self
+    }
+}
+
+#[mutants::skip]
+impl <T, A: Allocator, const CAP: usize> Capacity<InlineVecInnerWithoutCapacity<T, A, CAP>> for () {
+    fn from_new(_new_cap: usize) -> Self {}
+
+    fn set(&mut self, _cap: usize) {}
+
+    fn get(&self) -> usize {
+        if size_of::<T>() == 0 {
+            usize::MAX
+        } else {
+            CAP
+        }
+    }
+}
+
+#[mutants::skip]
+impl <T, A: Allocator> Capacity<AllocatingVecInnerWithoutCapacity<T, A>> for usize {
+    fn from_new(new_cap: usize) -> Self {
+        new_cap
+    }
+
+    fn set(&mut self, cap: usize) {
+        *self = cap;
+    }
+
+    fn get(&self) -> usize {
+        *self
     }
 }
 
@@ -105,7 +155,7 @@ pub(crate) trait VecInnerWithoutCapacity: Sized {
     unsafe fn grow_capacity(&mut self, cap: &mut usize, additional: usize, alloc: &Self::Allocator) -> Result<(), Self::ReserveError>;
 
     /// Attempts to shrink the capacity of this instance to just fit the provided `shrink_to`, may fail to shrink all the way.
-    /// If returning Ok, then the provided `cap` will be modified to reflect the changed capacity. if `shrink_to` >= `cap` then
+    /// If returning Ok, then the provided `cap` will be modified to reflect the changed capacity. If `shrink_to` >= `cap` then
     /// this function simply returns Ok.
     /// 
     /// # Safety
